@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Operation Log</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero">
+      <div class="hero-copy-wrap">
+        <p class="eyebrow">Operation Log</p>
+        <h1>A calm, simple place to track the patients you operate on.</h1>
+        <p class="hero-copy">
+          Built for quick entry, fast review, and clean export, with optional Google Drive backup when the app is hosted online.
+        </p>
+        <div class="hero-meta">
+          <span class="meta-pill">Local backup layers</span>
+          <span class="meta-pill">Quick search</span>
+          <span class="meta-pill">CSV, JSON, and Drive sync</span>
+        </div>
+      </div>
+      <div class="notice-card">
+        <p class="eyebrow">Important</p>
+        <h2>Starter App</h2>
+        <p>
+          This tool is meant for learning and personal workflow. It is not a full clinical records platform and does not include enterprise-grade security or compliance controls.
+        </p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">Photo Intake</p>
+          <h2>Extract From Theatre List Or Patient Sticker</h2>
+        </div>
+        <p class="panel-hint">Take a photo or upload an image to prefill the entry form below.</p>
+      </div>
+
+      <div class="capture-panel">
+        <div class="capture-actions">
+          <label for="cameraInput" class="primary-btn file-label">Take Photo</label>
+          <input type="file" id="cameraInput" accept="image/*" capture="environment" hidden>
+
+          <label for="photoInput" class="ghost-btn file-label">Upload Photo</label>
+          <input type="file" id="photoInput" accept="image/*" hidden>
+        </div>
+
+        <p id="photoStatus" class="support-copy">
+          The app will try to read text from the image in your browser and match it to the form.
+        </p>
+
+        <div class="capture-grid">
+          <div class="preview-card">
+            <img id="photoPreview" alt="Selected image preview" hidden>
+            <div id="previewEmpty" class="preview-empty">No image selected yet.</div>
+          </div>
+
+          <div class="ocr-card">
+            <div class="ocr-card-header">
+              <p class="eyebrow">Extracted Text</p>
+              <button type="button" id="applyExtractedBtn" class="ghost-btn">Apply To Form</button>
+            </div>
+            <textarea id="extractedText" rows="10" placeholder="Text pulled from the image will appear here. You can edit it before applying."></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="eyebrow">New Entry</p>
+          <h2 id="formTitle">Add Operated Patient</h2>
+        </div>
+        <p id="formHint" class="panel-hint">Fields marked with * are required.</p>
+      </div>
+
+      <form id="patient-form" class="patient-form">
+        <input type="hidden" id="entryId" name="entryId">
+
+        <label>
+          Patient name *
+          <input type="text" id="patientName" name="patientName" required maxlength="120">
+        </label>
+
+        <label>
+          Hospital / clinic number *
+          <input type="text" id="patientId" name="patientId" required maxlength="60">
+        </label>
+
+        <label>
+          Procedure *
+          <input type="text" id="procedure" name="procedure" required maxlength="160">
+        </label>
+
+        <label>
+          Operation date *
+          <input type="date" id="operationDate" name="operationDate" required>
+        </label>
+
+        <label>
+          Lead surgeon
+          <input type="text" id="leadSurgeon" name="leadSurgeon" maxlength="120" placeholder="Primary surgeon">
+        </label>
+
+        <label>
+          Assistant
+          <input type="text" id="assistantSurgeon" name="assistantSurgeon" maxlength="120" placeholder="Assistant surgeon">
+        </label>
+
+        <label>
+          Diagnosis
+          <input type="text" id="diagnosis" name="diagnosis" maxlength="160">
+        </label>
+
+        <label class="full-width">
+          Notes
+          <textarea id="notes" name="notes" rows="4" maxlength="500" placeholder="Operation notes, key findings, or follow-up reminders"></textarea>
+        </label>
+
+        <div class="form-actions full-width">
+          <button type="submit" id="submitBtn" class="primary-btn">Save Entry</button>
+          <button type="reset" id="resetBtn" class="ghost-btn">Clear Form</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header panel-header-stack">
+        <div>
+          <p class="eyebrow">Saved Entries</p>
+          <h2>Your Patient Log</h2>
+        </div>
+        <div class="toolbar">
+          <input type="search" id="searchInput" placeholder="Search patient, ID, procedure, surgeon, diagnosis">
+          <button id="exportBtn" class="ghost-btn" type="button">Export JSON</button>
+          <button id="exportCsvBtn" class="ghost-btn" type="button">Export CSV</button>
+          <label for="importFile" class="ghost-btn file-label">Import JSON</label>
+          <input type="file" id="importFile" accept=".json" hidden>
+        </div>
+      </div>
+
+      <p id="storageStatus" class="storage-status">Checking saved data status...</p>
+
+      <section class="sync-panel">
+        <div class="sync-panel-header">
+          <div>
+            <p class="eyebrow">Google Drive Sync</p>
+            <h3>Automatic Cloud Backup</h3>
+          </div>
+          <div class="sync-actions">
+            <button id="driveSignInBtn" class="ghost-btn" type="button">Connect Google Drive</button>
+            <button id="driveSyncBtn" class="ghost-btn" type="button" disabled>Sync Now</button>
+            <button id="driveSignOutBtn" class="ghost-btn" type="button" disabled>Disconnect</button>
+          </div>
+        </div>
+        <p id="driveStatus" class="storage-status sync-status">
+          Drive sync is not ready yet.
+        </p>
+      </section>
+
+      <div class="stats-grid">
+        <article class="stat-card">
+          <span class="stat-label">Total cases</span>
+          <strong id="totalCases">0</strong>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">This month</span>
+          <strong id="monthCases">0</strong>
+        </article>
+      </div>
+
+      <section class="infographic-panel">
+        <div class="panel-header panel-header-stack">
+          <div>
+            <p class="eyebrow">Visual Summary</p>
+            <h2>Case Infographic</h2>
+          </div>
+          <p class="panel-hint">A quick visual readout of the cases currently logged.</p>
+        </div>
+
+        <div class="infographic-grid">
+          <article class="infographic-card">
+            <div class="infographic-card-header">
+              <h3>Case Mix</h3>
+              <span id="caseMixCaption" class="bucket-meta">No cases yet</span>
+            </div>
+            <div id="caseMixChart" class="stacked-bar"></div>
+            <div id="caseMixLegend" class="legend-list"></div>
+          </article>
+
+          <article class="infographic-card">
+            <div class="infographic-card-header">
+              <h3>Lead Surgeons</h3>
+              <span id="surgeonCaption" class="bucket-meta">No surgeons yet</span>
+            </div>
+            <div id="surgeonLeaderboard" class="leaderboard-list"></div>
+          </article>
+
+          <article class="infographic-card infographic-card-wide">
+            <div class="infographic-card-header">
+              <h3>Recent Volume</h3>
+              <span id="volumeCaption" class="bucket-meta">Last 6 months</span>
+            </div>
+            <div id="volumeTimeline" class="timeline-chart"></div>
+          </article>
+        </div>
+      </section>
+
+      <div class="log-controls">
+        <div class="segmented-control" role="tablist" aria-label="Log views">
+          <button id="groupedViewBtn" class="segment-btn is-active" type="button">Grouped Cases</button>
+          <button id="tableViewBtn" class="segment-btn" type="button">All Entries</button>
+        </div>
+        <div id="categoryFilters" class="category-filters"></div>
+      </div>
+
+      <div id="emptyState" class="empty-state">
+        No entries yet. Add your first operated patient above.
+      </div>
+
+      <div id="groupedLog" class="grouped-log"></div>
+
+      <div class="table-wrap">
+        <table id="entriesTable" hidden>
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Patient</th>
+              <th>ID</th>
+              <th>Procedure</th>
+              <th>Lead surgeon</th>
+              <th>Assistant</th>
+              <th>Notes</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="entriesBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <template id="rowTemplate">
+    <tr>
+      <td data-field="operationDate"></td>
+      <td data-field="patientName"></td>
+      <td data-field="patientId"></td>
+      <td data-field="procedure"></td>
+      <td data-field="leadSurgeon"></td>
+      <td data-field="assistantSurgeon"></td>
+      <td data-field="notes"></td>
+      <td>
+        <button class="ghost-btn table-btn" type="button" data-action="edit">Edit</button>
+        <button class="danger-btn" type="button" data-action="delete">Delete</button>
+      </td>
+    </tr>
+  </template>
+
+  <script src="config.js"></script>
+  <script async defer src="https://accounts.google.com/gsi/client"></script>
+  <script async defer src="https://apis.google.com/js/api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
