@@ -6,10 +6,24 @@ const DB_STORE_NAME = "entryState";
 const DB_STATE_ID = "main";
 const OCR_NOTE_PREFIX = "Source OCR:";
 const MAX_SNAPSHOTS = 5;
-const GOOGLE_DISCOVERY_DOC = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
+const GOOGLE_DRIVE_DISCOVERY_DOC = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
+const GOOGLE_SHEETS_DISCOVERY_DOC = "https://sheets.googleapis.com/$discovery/rest?version=v4";
 const GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const DRIVE_FILE_ID_STORAGE_KEY = "operation-log-drive-file-id";
 const DRIVE_FOLDER_ID_STORAGE_KEY = "operation-log-drive-folder-id";
+const TESSERACT_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/6.0.1/tesseract.min.js";
+const SHEET_HEADER_ROW = [[
+  "Entry ID",
+  "Saved At",
+  "Operation Date",
+  "Patient Name",
+  "Hospital Number",
+  "Procedure",
+  "My Role",
+  "Diagnosis",
+  "Notes",
+]];
 
 const form = document.getElementById("patient-form");
 const formTitle = document.getElementById("formTitle");
@@ -63,11 +77,16 @@ let googleIdentityReady = false;
 let driveAccessToken = "";
 let driveSyncInFlight = false;
 let pendingDriveSyncReason = "";
+let tesseractLoaderPromise = null;
+let pendingSheetEntries = [];
+let sheetSyncInFlight = false;
+let sheetHeaderEnsured = false;
 
 initApp();
 
 form.addEventListener("submit", (event) => {
   event.preventDefault();
+  const isNewEntry = !form.entryId.value;
 
   const entry = {
     id: form.entryId.value || crypto.randomUUID(),
@@ -75,8 +94,7 @@ form.addEventListener("submit", (event) => {
     patientId: form.patientId.value.trim(),
     procedure: form.procedure.value.trim(),
     operationDate: form.operationDate.value,
-    leadSurgeon: form.leadSurgeon.value.trim(),
-    assistantSurgeon: form.assistantSurgeon.value.trim(),
+    myRole: form.myRole.value || "",
     diagnosis: form.diagnosis.value.trim(),
     notes: form.notes.value.trim(),
     createdAt: form.entryId.value ? findExistingCreatedAt(form.entryId.value) : new Date().toISOString(),
@@ -90,7 +108,11 @@ form.addEventListener("submit", (event) => {
 
   entries.sort(compareByOperationDateDesc);
   persistEntries();
+  if (isNewEntry) {
+    scheduleSheetAppend(entry, "New patient saved");
+  }
   renderEntries(searchInput.value);
+  clearPhotoCapture();
   resetForm();
 });
 
@@ -148,8 +170,7 @@ exportCsvBtn.addEventListener("click", () => {
     "Patient Name",
     "Patient ID",
     "Procedure",
-    "Lead Surgeon",
-    "Assistant",
+    "My Role",
     "Diagnosis",
     "Notes",
   ];
@@ -159,8 +180,7 @@ exportCsvBtn.addEventListener("click", () => {
     entry.patientName,
     entry.patientId,
     entry.procedure,
-    entry.leadSurgeon || "",
-    entry.assistantSurgeon || "",
+    entry.myRole || "",
     entry.diagnosis || "",
     entry.notes || "",
   ]);
@@ -220,7 +240,7 @@ async function initApp() {
   updatePhotoStatus(
     supportsTextDetector()
       ? "Ready to read a theatre list or sticker. Review the extracted text before saving."
-      : "Camera and upload are ready, but automatic text reading depends on browser OCR support."
+      : "Ready to read a theatre list or sticker. On this device, OCR may take a few extra seconds while the browser loads the text reader."
   );
 
   const restoredState = await loadBestAvailableState();
@@ -302,12 +322,22 @@ function handleLogAction(event) {
 }
 
 async function extractTextFromImage(file) {
-  if (!supportsTextDetector()) {
-    throw new Error(
-      "This browser can open the camera or upload a photo, but automatic text extraction is not available here yet. Try Chrome or Edge on a supported device."
-    );
+  if (supportsTextDetector()) {
+    try {
+      return await extractTextWithTextDetector(file);
+    } catch (error) {
+      const fallbackText = await extractTextWithTesseract(file, error);
+      if (fallbackText) {
+        return fallbackText;
+      }
+      throw error;
+    }
   }
 
+  return extractTextWithTesseract(file);
+}
+
+async function extractTextWithTextDetector(file) {
   const detector = new window.TextDetector();
   const bitmap = await createImageBitmap(file);
 
@@ -334,6 +364,124 @@ async function extractTextFromImage(file) {
   }
 }
 
+async function extractTextWithTesseract(file, priorError = null) {
+  const tesseract = await loadTesseractLibrary();
+  const processedImage = await prepareImageForOcr(file);
+  const worker = await tesseract.createWorker("eng");
+
+  try {
+    const result = await worker.recognize(processedImage);
+    const rawText = (result?.data?.text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join("\n");
+
+    if (!rawText) {
+      throw new Error("I could not find readable text in that image. Try a closer photo with stronger lighting and less glare.");
+    }
+
+    return rawText;
+  } catch (error) {
+    if (priorError) {
+      throw new Error(`The browser OCR fallback also failed. Native scan: ${priorError.message}. Fallback scan: ${error.message}`);
+    }
+
+    throw error;
+  } finally {
+    if (typeof worker.terminate === "function") {
+      await worker.terminate();
+    }
+
+    if (processedImage.startsWith("blob:")) {
+      URL.revokeObjectURL(processedImage);
+    }
+  }
+}
+
+function loadTesseractLibrary() {
+  if (window.Tesseract) {
+    return Promise.resolve(window.Tesseract);
+  }
+
+  if (tesseractLoaderPromise) {
+    return tesseractLoaderPromise;
+  }
+
+  tesseractLoaderPromise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector(`script[src="${TESSERACT_CDN_URL}"]`);
+
+    if (existingScript && window.Tesseract) {
+      resolve(window.Tesseract);
+      return;
+    }
+
+    const script = existingScript || document.createElement("script");
+    script.src = TESSERACT_CDN_URL;
+    script.defer = true;
+
+    script.addEventListener("load", () => {
+      if (window.Tesseract) {
+        resolve(window.Tesseract);
+        return;
+      }
+
+      reject(new Error("The OCR library loaded, but the browser could not start it."));
+    }, { once: true });
+
+    script.addEventListener("error", () => {
+      reject(new Error("The browser could not load the OCR library. Check that the device has internet access."));
+    }, { once: true });
+
+    if (!existingScript) {
+      document.head.appendChild(script);
+    }
+  });
+
+  return tesseractLoaderPromise;
+}
+
+async function prepareImageForOcr(file) {
+  const bitmap = await createImageBitmap(file);
+  const longestSide = Math.max(bitmap.width, bitmap.height);
+  const scale = longestSide < 1800 ? 1800 / longestSide : 1;
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+
+  canvas.width = width;
+  canvas.height = height;
+
+  context.filter = "grayscale(1) contrast(1.25) brightness(1.08)";
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  const imageData = context.getImageData(0, 0, width, height);
+  const { data } = imageData;
+
+  for (let index = 0; index < data.length; index += 4) {
+    const value = data[index];
+    const normalized = value > 168 ? 255 : value < 88 ? 0 : value;
+    data[index] = normalized;
+    data[index + 1] = normalized;
+    data[index + 2] = normalized;
+  }
+
+  context.putImageData(imageData, 0, 0);
+
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("The browser could not prepare the image for OCR."));
+        return;
+      }
+
+      resolve(URL.createObjectURL(blob));
+    }, "image/png");
+  });
+}
+
 function showPreview(file) {
   if (previewObjectUrl) {
     URL.revokeObjectURL(previewObjectUrl);
@@ -343,6 +491,27 @@ function showPreview(file) {
   photoPreview.src = previewObjectUrl;
   photoPreview.hidden = false;
   previewEmpty.hidden = true;
+}
+
+function clearPhotoCapture() {
+  if (previewObjectUrl) {
+    URL.revokeObjectURL(previewObjectUrl);
+    previewObjectUrl = "";
+  }
+
+  photoPreview.removeAttribute("src");
+  photoPreview.hidden = true;
+  previewEmpty.hidden = false;
+  extractedText.value = "";
+  cameraInput.value = "";
+  photoInput.value = "";
+  lastExtractedRecord = null;
+  syncApplyButtonState();
+  updatePhotoStatus(
+    supportsTextDetector()
+      ? "Ready to read a theatre list or sticker. Review the extracted text before saving."
+      : "Ready to read a theatre list or sticker. On this device, OCR may take a few extra seconds while the browser loads the text reader."
+  );
 }
 
 function setPhotoProcessingState(isProcessing) {
@@ -372,8 +541,7 @@ function parseRecordFromText(rawText) {
     operationDate: normalizeDateValue(
       findLabeledValue(lines, ["date", "operation date", "op date"]) || findLikelyDate(cleanedText)
     ),
-    leadSurgeon: findLabeledValue(lines, ["lead surgeon", "surgeon", "consultant"]) || "",
-    assistantSurgeon: findLabeledValue(lines, ["assistant", "assistant surgeon"]) || "",
+    myRole: "",
     diagnosis: findLabeledValue(lines, ["diagnosis", "dx", "indication"]) || "",
     notes: cleanedText,
   };
@@ -383,8 +551,6 @@ function applyRecordToForm(record, rawText) {
   form.patientName.value = chooseBetterValue(form.patientName.value, record.patientName);
   form.patientId.value = chooseBetterValue(form.patientId.value, record.patientId);
   form.procedure.value = chooseBetterValue(form.procedure.value, record.procedure);
-  form.leadSurgeon.value = chooseBetterValue(form.leadSurgeon.value, record.leadSurgeon);
-  form.assistantSurgeon.value = chooseBetterValue(form.assistantSurgeon.value, record.assistantSurgeon);
   form.diagnosis.value = chooseBetterValue(form.diagnosis.value, record.diagnosis);
 
   if (record.operationDate) {
@@ -474,7 +640,7 @@ function syncApplyButtonState() {
 function initializeDriveSync() {
   if (!isHostedOrigin()) {
     updateDriveStatus(
-      "Google Drive sync needs this app to run from a real web address like localhost or HTTPS. It cannot sign in from file://.",
+      "Google cloud sync needs this app to run from a real web address like localhost or HTTPS. It cannot sign in from file://.",
       "warning"
     );
     syncDriveButtons();
@@ -483,7 +649,7 @@ function initializeDriveSync() {
 
   if (!hasGoogleDriveConfig()) {
     updateDriveStatus(
-      "Google Drive sync is ready for setup. Add your Google OAuth client ID and API key in config.js, then host the app.",
+      "Google cloud sync is ready for setup. Add your Google OAuth client ID and API key in config.js, then host the app.",
       "warning"
     );
     syncDriveButtons();
@@ -495,7 +661,9 @@ function initializeDriveSync() {
       await initializeGoogleApiClient();
       initializeGoogleTokenClient();
       updateDriveStatus(
-        "Google Drive backup is ready. Connect your Google account to mirror the logbook online after each save.",
+        hasGoogleSheetsConfig()
+          ? "Google backup and spreadsheet sync are ready. Connect your Google account to mirror the logbook online and append new patients into Sheets."
+          : "Google Drive backup is ready. Connect your Google account to mirror the logbook online after each save.",
         "success"
       );
       syncDriveButtons();
@@ -548,14 +716,14 @@ async function initializeGoogleApiClient() {
 
   await window.gapi.client.init({
     apiKey: getDriveConfig().googleApiKey,
-    discoveryDocs: [GOOGLE_DISCOVERY_DOC],
+    discoveryDocs: [GOOGLE_DRIVE_DISCOVERY_DOC, GOOGLE_SHEETS_DISCOVERY_DOC],
   });
 }
 
 function initializeGoogleTokenClient() {
   tokenClient = window.google.accounts.oauth2.initTokenClient({
     client_id: getDriveConfig().googleClientId,
-    scope: GOOGLE_DRIVE_SCOPE,
+    scope: `${GOOGLE_DRIVE_SCOPE} ${GOOGLE_SHEETS_SCOPE}`,
     callback: async (tokenResponse) => {
       if (tokenResponse?.error) {
         updateDriveStatus(`Google sign-in failed: ${tokenResponse.error}`, "error");
@@ -565,9 +733,15 @@ function initializeGoogleTokenClient() {
 
       driveAccessToken = tokenResponse.access_token || "";
       window.gapi.client.setToken({ access_token: driveAccessToken });
-      updateDriveStatus("Google Drive connected. New entries will sync automatically after each save.", "success");
+      updateDriveStatus(
+        hasGoogleSheetsConfig()
+          ? "Google connected. Drive backups are active, and new patients will be appended to your spreadsheet."
+          : "Google Drive connected. New entries will sync automatically after each save.",
+        "success"
+      );
       syncDriveButtons();
       scheduleDriveSync("Initial Google Drive connection");
+      flushPendingSheetEntries();
     },
   });
 }
@@ -588,7 +762,7 @@ function handleDriveSignOut() {
 
   driveAccessToken = "";
   window.gapi?.client?.setToken?.(null);
-  updateDriveStatus("Google Drive disconnected. Local saving still works, but cloud backup is paused.", "warning");
+  updateDriveStatus("Google cloud sync disconnected. Local saving still works, but Drive and spreadsheet sync are paused.", "warning");
   syncDriveButtons();
 }
 
@@ -607,6 +781,11 @@ function isHostedOrigin() {
 
 function isDriveSyncAvailable() {
   return isHostedOrigin() && hasGoogleDriveConfig() && tokenClient && window.gapi?.client?.drive;
+}
+
+function hasGoogleSheetsConfig() {
+  const config = getDriveConfig();
+  return Boolean(config.googleSpreadsheetId);
 }
 
 function isDriveSignedIn() {
@@ -635,6 +814,125 @@ function updateDriveStatus(message, tone = "") {
   if (tone === "error") {
     driveStatus.classList.add("status-error");
   }
+}
+
+function scheduleSheetAppend(entry, reason = "New patient saved") {
+  if (!hasGoogleSheetsConfig()) {
+    return;
+  }
+
+  pendingSheetEntries.push({ entry, reason });
+  flushPendingSheetEntries();
+}
+
+async function flushPendingSheetEntries() {
+  if (
+    sheetSyncInFlight ||
+    !pendingSheetEntries.length ||
+    !isDriveSignedIn() ||
+    !window.gapi?.client?.sheets
+  ) {
+    return;
+  }
+
+  sheetSyncInFlight = true;
+
+  try {
+    await ensureSheetTabAndHeader();
+
+    while (pendingSheetEntries.length) {
+      const { entry, reason } = pendingSheetEntries[0];
+      await appendEntryToSheet(entry);
+      pendingSheetEntries.shift();
+      updateDriveStatus(
+        `${reason}. Drive backup is active and the spreadsheet was updated ${formatTimestamp(new Date().toISOString())}.`,
+        "success"
+      );
+    }
+  } catch (error) {
+    updateDriveStatus(`Drive backup may still work, but spreadsheet sync failed: ${error.message}`, "error");
+  } finally {
+    sheetSyncInFlight = false;
+  }
+}
+
+async function ensureSheetTabAndHeader() {
+  if (!hasGoogleSheetsConfig()) {
+    return;
+  }
+
+  const config = getDriveConfig();
+  const spreadsheetId = config.googleSpreadsheetId;
+  const sheetName = config.googleSheetName || "Cases";
+  const spreadsheet = await window.gapi.client.sheets.spreadsheets.get({
+    spreadsheetId,
+    includeGridData: false,
+  });
+
+  const existingTitles = (spreadsheet.result.sheets || []).map((sheet) => sheet.properties?.title);
+  if (!existingTitles.includes(sheetName)) {
+    await window.gapi.client.sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requests: [
+        {
+          addSheet: {
+            properties: {
+              title: sheetName,
+            },
+          },
+        },
+      ],
+    });
+  }
+
+  if (sheetHeaderEnsured) {
+    return;
+  }
+
+  const headerRange = `${sheetName}!A1:I1`;
+  const headerResponse = await window.gapi.client.sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: headerRange,
+  });
+
+  const hasHeader = Array.isArray(headerResponse.result.values) && headerResponse.result.values[0]?.[0] === "Entry ID";
+  if (!hasHeader) {
+    await window.gapi.client.sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: headerRange,
+      valueInputOption: "RAW",
+      values: SHEET_HEADER_ROW,
+    });
+  }
+
+  sheetHeaderEnsured = true;
+}
+
+async function appendEntryToSheet(entry) {
+  const config = getDriveConfig();
+  const spreadsheetId = config.googleSpreadsheetId;
+  const sheetName = config.googleSheetName || "Cases";
+  const notesWithoutOcr = stripOcrBlock(entry.notes || "");
+
+  await window.gapi.client.sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${sheetName}!A:I`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    resource: {
+      values: [[
+        entry.id,
+        entry.createdAt || new Date().toISOString(),
+        entry.operationDate || "",
+        entry.patientName || "",
+        entry.patientId || "",
+        entry.procedure || "",
+        entry.myRole || "",
+        entry.diagnosis || "",
+        notesWithoutOcr,
+      ]],
+    },
+  });
 }
 
 function scheduleDriveSync(reason) {
@@ -1023,14 +1321,26 @@ function inferUpdatedAt(entryList) {
 }
 
 function normalizeEntry(entry) {
+  const inferredRole = entry.myRole || inferRoleFromLegacyEntry(entry);
   return {
     ...entry,
-    leadSurgeon: entry.leadSurgeon || "",
-    assistantSurgeon: entry.assistantSurgeon || "",
+    myRole: inferredRole,
     diagnosis: entry.diagnosis || "",
     notes: entry.notes || "",
     createdAt: entry.createdAt || new Date().toISOString(),
   };
+}
+
+function inferRoleFromLegacyEntry(entry) {
+  if (entry.leadSurgeon) {
+    return "Lead surgeon";
+  }
+
+  if (entry.assistantSurgeon) {
+    return "Assistant";
+  }
+
+  return "";
 }
 
 function renderEntries(query = "") {
@@ -1045,8 +1355,7 @@ function renderEntries(query = "") {
         entry.patientName,
         entry.patientId,
         entry.procedure,
-        entry.leadSurgeon,
-        entry.assistantSurgeon,
+        entry.myRole,
         entry.diagnosis,
         entry.notes,
         entry.caseCategory,
@@ -1086,8 +1395,7 @@ function renderTableEntries(visibleEntries) {
     row.querySelector("[data-field='patientName']").textContent = entry.patientName;
     row.querySelector("[data-field='patientId']").textContent = entry.patientId;
     row.querySelector("[data-field='procedure']").textContent = entry.procedure;
-    row.querySelector("[data-field='leadSurgeon']").textContent = entry.leadSurgeon || "-";
-    row.querySelector("[data-field='assistantSurgeon']").textContent = entry.assistantSurgeon || "-";
+    row.querySelector("[data-field='myRole']").textContent = entry.myRole || "-";
     row.querySelector("[data-field='notes']").textContent = entry.notes || "No notes";
     entriesBody.appendChild(row);
   });
@@ -1164,8 +1472,7 @@ function renderGroupedEntries(visibleEntries) {
                 <span class="case-row-title">${entry.patientName}</span>
                 <span class="case-row-meta">${formatDate(entry.operationDate)} | ${entry.patientId}</span>
                 <div class="case-row-tags">
-                  ${entry.leadSurgeon ? `<span class="tag">Lead: ${entry.leadSurgeon}</span>` : ""}
-                  ${entry.assistantSurgeon ? `<span class="tag">Assistant: ${entry.assistantSurgeon}</span>` : ""}
+                  ${entry.myRole ? `<span class="tag">${entry.myRole}</span>` : ""}
                   ${entry.diagnosis ? `<span class="tag">${entry.diagnosis}</span>` : ""}
                 </div>
               </div>
@@ -1195,8 +1502,7 @@ function renderCategoryFilters(categories, normalizedQuery) {
         entry.patientName,
         entry.patientId,
         entry.procedure,
-        entry.leadSurgeon,
-        entry.assistantSurgeon,
+        entry.myRole,
         entry.diagnosis,
         entry.notes,
         entryCategory,
@@ -1285,7 +1591,7 @@ function renderSurgeonInfographic(visibleEntries) {
 
   const surgeons = Array.from(
     visibleEntries.reduce((map, entry) => {
-      const key = entry.leadSurgeon || "Unassigned";
+      const key = entry.myRole || "Unassigned";
       map.set(key, (map.get(key) || 0) + 1);
       return map;
     }, new Map()).entries()
@@ -1294,11 +1600,11 @@ function renderSurgeonInfographic(visibleEntries) {
     .slice(0, 5);
 
   if (surgeons.length === 0) {
-    surgeonCaption.textContent = "No surgeons yet";
+    surgeonCaption.textContent = "No roles yet";
     return;
   }
 
-  surgeonCaption.textContent = `${surgeons.length} surgeon${surgeons.length === 1 ? "" : "s"} shown`;
+  surgeonCaption.textContent = `${surgeons.length} role${surgeons.length === 1 ? "" : "s"} shown`;
   const maxCount = surgeons[0][1] || 1;
 
   surgeons.forEach(([surgeon, count]) => {
@@ -1353,8 +1659,11 @@ function populateForm(entry) {
   form.patientId.value = entry.patientId;
   form.procedure.value = entry.procedure;
   form.operationDate.value = entry.operationDate;
-  form.leadSurgeon.value = entry.leadSurgeon || "";
-  form.assistantSurgeon.value = entry.assistantSurgeon || "";
+  if (entry.myRole === "Lead surgeon") {
+    form.roleLead.checked = true;
+  } else if (entry.myRole === "Assistant") {
+    form.roleAssistant.checked = true;
+  }
   form.diagnosis.value = entry.diagnosis || "";
   form.notes.value = entry.notes || "";
 
@@ -1368,6 +1677,12 @@ function resetForm() {
   form.reset();
   form.entryId.value = "";
   form.operationDate.valueAsDate = new Date();
+  if (form.roleLead) {
+    form.roleLead.checked = false;
+  }
+  if (form.roleAssistant) {
+    form.roleAssistant.checked = false;
+  }
   formTitle.textContent = "Add Operated Patient";
   formHint.textContent = "Fields marked with * are required.";
   submitBtn.textContent = "Save Entry";
