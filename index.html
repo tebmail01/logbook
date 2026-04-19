@@ -49,7 +49,7 @@
         </div>
 
         <p id="photoStatus" class="support-copy">
-          The app will try to read text from the image in your browser and match it to the form.
+          The app will try to read text from the image in your browser and match it to the form. On some phones, the first scan may take a little longer.
         </p>
 
         <div class="capture-grid">
@@ -101,15 +101,19 @@
           <input type="date" id="operationDate" name="operationDate" required>
         </label>
 
-        <label>
-          Lead surgeon
-          <input type="text" id="leadSurgeon" name="leadSurgeon" maxlength="120" placeholder="Primary surgeon">
-        </label>
-
-        <label>
-          Assistant
-          <input type="text" id="assistantSurgeon" name="assistantSurgeon" maxlength="120" placeholder="Assistant surgeon">
-        </label>
+        <fieldset class="role-fieldset">
+          <legend>My role</legend>
+          <div class="role-toggle" role="radiogroup" aria-label="My role">
+            <label class="role-option">
+              <input type="radio" id="roleLead" name="myRole" value="Lead surgeon">
+              <span>Lead surgeon</span>
+            </label>
+            <label class="role-option">
+              <input type="radio" id="roleAssistant" name="myRole" value="Assistant">
+              <span>Assistant</span>
+            </label>
+          </div>
+        </fieldset>
 
         <label>
           Diagnosis
@@ -135,7 +139,7 @@
           <h2>Your Patient Log</h2>
         </div>
         <div class="toolbar">
-          <input type="search" id="searchInput" placeholder="Search patient, ID, procedure, surgeon, diagnosis">
+          <input type="search" id="searchInput" placeholder="Search patient, ID, procedure, role, diagnosis">
           <button id="exportBtn" class="ghost-btn" type="button">Export JSON</button>
           <button id="exportCsvBtn" class="ghost-btn" type="button">Export CSV</button>
           <label for="importFile" class="ghost-btn file-label">Import JSON</label>
@@ -159,6 +163,9 @@
         </div>
         <p id="driveStatus" class="storage-status sync-status">
           Drive sync is not ready yet.
+        </p>
+        <p class="panel-hint">
+          If you add a Google Spreadsheet ID in `config.js`, each new saved patient can also be appended to a spreadsheet row automatically.
         </p>
       </section>
 
@@ -194,8 +201,8 @@
 
           <article class="infographic-card">
             <div class="infographic-card-header">
-              <h3>Lead Surgeons</h3>
-              <span id="surgeonCaption" class="bucket-meta">No surgeons yet</span>
+              <h3>My Role</h3>
+              <span id="surgeonCaption" class="bucket-meta">No roles yet</span>
             </div>
             <div id="surgeonLeaderboard" class="leaderboard-list"></div>
           </article>
@@ -232,8 +239,7 @@
               <th>Patient</th>
               <th>ID</th>
               <th>Procedure</th>
-              <th>Lead surgeon</th>
-              <th>Assistant</th>
+              <th>My role</th>
               <th>Notes</th>
               <th>Actions</th>
             </tr>
@@ -250,8 +256,7 @@
       <td data-field="patientName"></td>
       <td data-field="patientId"></td>
       <td data-field="procedure"></td>
-      <td data-field="leadSurgeon"></td>
-      <td data-field="assistantSurgeon"></td>
+      <td data-field="myRole"></td>
       <td data-field="notes"></td>
       <td>
         <button class="ghost-btn table-btn" type="button" data-action="edit">Edit</button>
@@ -261,6 +266,7 @@
   </template>
 
   <script src="config.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/6.0.1/tesseract.min.js"></script>
   <script async defer src="https://accounts.google.com/gsi/client"></script>
   <script async defer src="https://apis.google.com/js/api.js"></script>
   <script src="app.js"></script>
