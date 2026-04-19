@@ -13,6 +13,7 @@ const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const DRIVE_FILE_ID_STORAGE_KEY = "operation-log-drive-file-id";
 const DRIVE_FOLDER_ID_STORAGE_KEY = "operation-log-drive-folder-id";
 const TESSERACT_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/6.0.1/tesseract.min.js";
+const SERVICE_WORKER_PATH = "./service-worker.js";
 const SHEET_HEADER_ROW = [[
   "Entry ID",
   "Saved At",
@@ -235,6 +236,7 @@ driveSyncBtn.addEventListener("click", () => {
 driveSignOutBtn.addEventListener("click", handleDriveSignOut);
 
 async function initApp() {
+  registerServiceWorker();
   resetForm();
   syncApplyButtonState();
   updatePhotoStatus(
@@ -715,7 +717,7 @@ async function initializeGoogleApiClient() {
   });
 
   await window.gapi.client.init({
-    apiKey: getDriveConfig().googleApiKey,
+    apiKey: getGoogleApiKey(),
     discoveryDocs: [GOOGLE_DRIVE_DISCOVERY_DOC, GOOGLE_SHEETS_DISCOVERY_DOC],
   });
 }
@@ -768,11 +770,16 @@ function handleDriveSignOut() {
 
 function hasGoogleDriveConfig() {
   const config = getDriveConfig();
-  return Boolean(config.googleClientId && config.googleApiKey);
+  return Boolean(config.googleClientId && getGoogleApiKey());
 }
 
 function getDriveConfig() {
   return window.OPERATION_LOG_CONFIG || {};
+}
+
+function getGoogleApiKey() {
+  const config = getDriveConfig();
+  return config.googleApiKey || config.googleApiKeyBackup || "";
 }
 
 function isHostedOrigin() {
@@ -901,7 +908,9 @@ async function ensureSheetTabAndHeader() {
       spreadsheetId,
       range: headerRange,
       valueInputOption: "RAW",
-      values: SHEET_HEADER_ROW,
+      resource: {
+        values: SHEET_HEADER_ROW,
+      },
     });
   }
 
@@ -991,27 +1000,31 @@ function buildDriveSyncPayload() {
 
 async function ensureDriveBackupFile() {
   const config = getDriveConfig();
-  const cachedFileId = localStorage.getItem(DRIVE_FILE_ID_STORAGE_KEY);
-  const folderId = await ensureDriveFolder(config.driveFolderName);
+  const folderId = await ensureDriveFolder(config.driveFolderName || "Operation Log Backups");
+  const storedFileId = localStorage.getItem(DRIVE_FILE_ID_STORAGE_KEY);
 
-  if (cachedFileId) {
+  if (storedFileId) {
     try {
       await window.gapi.client.drive.files.get({
-        fileId: cachedFileId,
-        fields: "id, name",
+        fileId: storedFileId,
+        fields: "id,name,trashed",
       });
-      return cachedFileId;
+      return storedFileId;
     } catch {
       localStorage.removeItem(DRIVE_FILE_ID_STORAGE_KEY);
     }
   }
 
-  const escapedFileName = escapeDriveQueryValue(config.driveFileName || "operation-log-sync.json");
-  const folderClause = folderId ? `'${folderId}' in parents and ` : "";
+  const query = [
+    `'${folderId}' in parents`,
+    "trashed = false",
+    `name = '${escapeDriveQueryValue(config.driveFileName || "operation-log-sync.json")}'`,
+  ].join(" and ");
+
   const searchResponse = await window.gapi.client.drive.files.list({
-    q: `${folderClause}name='${escapedFileName}' and trashed=false`,
-    fields: "files(id, name)",
+    q: query,
     pageSize: 1,
+    fields: "files(id,name)",
   });
 
   const existingFile = searchResponse.result.files?.[0];
@@ -1020,114 +1033,87 @@ async function ensureDriveBackupFile() {
     return existingFile.id;
   }
 
-  const metadata = {
-    name: config.driveFileName || "operation-log-sync.json",
-    mimeType: "application/json",
-  };
+  const createResponse = await window.gapi.client.drive.files.create({
+    resource: {
+      name: config.driveFileName || "operation-log-sync.json",
+      parents: [folderId],
+      mimeType: "application/json",
+    },
+    fields: "id",
+  });
 
-  if (folderId) {
-    metadata.parents = [folderId];
-  }
-
-  const created = await createDriveFile(metadata, buildDriveSyncPayload());
-  localStorage.setItem(DRIVE_FILE_ID_STORAGE_KEY, created.id);
-  return created.id;
+  const fileId = createResponse.result.id;
+  localStorage.setItem(DRIVE_FILE_ID_STORAGE_KEY, fileId);
+  return fileId;
 }
 
 async function ensureDriveFolder(folderName) {
-  if (!folderName) {
-    return "";
-  }
+  const storedFolderId = localStorage.getItem(DRIVE_FOLDER_ID_STORAGE_KEY);
 
-  const cachedFolderId = localStorage.getItem(DRIVE_FOLDER_ID_STORAGE_KEY);
-  if (cachedFolderId) {
+  if (storedFolderId) {
     try {
       await window.gapi.client.drive.files.get({
-        fileId: cachedFolderId,
-        fields: "id, name",
+        fileId: storedFolderId,
+        fields: "id,name,trashed",
       });
-      return cachedFolderId;
+      return storedFolderId;
     } catch {
       localStorage.removeItem(DRIVE_FOLDER_ID_STORAGE_KEY);
     }
   }
 
-  const escapedFolderName = escapeDriveQueryValue(folderName);
-  const response = await window.gapi.client.drive.files.list({
-    q: `mimeType='application/vnd.google-apps.folder' and name='${escapedFolderName}' and trashed=false`,
-    fields: "files(id, name)",
+  const query = [
+    "mimeType = 'application/vnd.google-apps.folder'",
+    "trashed = false",
+    `name = '${escapeDriveQueryValue(folderName)}'`,
+  ].join(" and ");
+
+  const searchResponse = await window.gapi.client.drive.files.list({
+    q: query,
     pageSize: 1,
+    fields: "files(id,name)",
   });
 
-  const existingFolder = response.result.files?.[0];
+  const existingFolder = searchResponse.result.files?.[0];
   if (existingFolder?.id) {
     localStorage.setItem(DRIVE_FOLDER_ID_STORAGE_KEY, existingFolder.id);
     return existingFolder.id;
   }
 
-  const createdFolder = await createDriveFile({
-    name: folderName,
-    mimeType: "application/vnd.google-apps.folder",
+  const createResponse = await window.gapi.client.drive.files.create({
+    resource: {
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+    },
+    fields: "id",
   });
 
-  localStorage.setItem(DRIVE_FOLDER_ID_STORAGE_KEY, createdFolder.id);
-  return createdFolder.id;
+  const folderId = createResponse.result.id;
+  localStorage.setItem(DRIVE_FOLDER_ID_STORAGE_KEY, folderId);
+  return folderId;
 }
 
-async function uploadDriveFile(fileId, payload) {
-  const config = getDriveConfig();
+async function uploadDriveFile(fileId, content) {
   const metadata = {
-    name: config.driveFileName || "operation-log-sync.json",
+    name: getDriveConfig().driveFileName || "operation-log-sync.json",
     mimeType: "application/json",
   };
 
-  const boundary = `operation-log-${Date.now()}`;
-  const body =
-    `--${boundary}\r\n` +
-    "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
-    `${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\n` +
-    "Content-Type: application/json\r\n\r\n" +
-    `${payload}\r\n` +
-    `--${boundary}--`;
+  const formData = new FormData();
+  formData.append("metadata", new Blob([JSON.stringify(metadata)], { type: "application/json" }));
+  formData.append("file", new Blob([content], { type: "application/json" }));
 
-  const response = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`, {
+  const response = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(fileId)}?uploadType=multipart`, {
     method: "PATCH",
     headers: {
       Authorization: `Bearer ${driveAccessToken}`,
-      "Content-Type": `multipart/related; boundary=${boundary}`,
     },
-    body,
+    body: formData,
   });
 
   if (!response.ok) {
-    throw new Error(`Upload failed with status ${response.status}`);
-  }
-}
-
-async function createDriveFile(metadata, payload = "") {
-  const boundary = `operation-log-${Date.now()}`;
-  const contentType = metadata.mimeType === "application/vnd.google-apps.folder" ? "text/plain" : "application/json";
-  const body =
-    `--${boundary}\r\n` +
-    "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
-    `${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\n` +
-    `Content-Type: ${contentType}\r\n\r\n` +
-    `${payload}\r\n` +
-    `--${boundary}--`;
-
-  const response = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${driveAccessToken}`,
-      "Content-Type": `multipart/related; boundary=${boundary}`,
-    },
-    body,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Create failed with status ${response.status}`);
+    const text = await response.text();
+    throw new Error(text || `HTTP ${response.status}`);
   }
 
   return response.json();
@@ -1863,4 +1849,14 @@ function formatMonthKey(monthKey) {
   const [year, month] = monthKey.split("-");
   const date = new Date(Number(year), Number(month) - 1, 1);
   return new Intl.DateTimeFormat(undefined, { month: "short" }).format(date);
+}
+
+function registerServiceWorker() {
+  if (!isHostedOrigin() || !("serviceWorker" in navigator)) {
+    return;
+  }
+
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register(SERVICE_WORKER_PATH).catch(() => {});
+  }, { once: true });
 }
